@@ -477,32 +477,34 @@ static const struct joycon_ctlr_button_mapping snescon_button_mappings[] = {
 	{ /* sentinel */ },
 };
 
+/* MiSTer: button mapping from MiSTer 5.15 (#50), not mainline's */
 static const struct joycon_ctlr_button_mapping gencon_button_mappings[] = {
-	{ BTN_WEST,	JC_BTN_A,	}, /* A */
+	{ BTN_EAST,	JC_BTN_A,	}, /* A */
 	{ BTN_SOUTH,	JC_BTN_B,	}, /* B */
-	{ BTN_EAST,	JC_BTN_R,	}, /* C */
-	{ BTN_TL,	JC_BTN_X,	}, /* X MD/GEN 6B Only */
-	{ BTN_NORTH,	JC_BTN_Y,	}, /* Y MD/GEN 6B Only */
-	{ BTN_TR,	JC_BTN_L,	}, /* Z MD/GEN 6B Only */
-	{ BTN_SELECT,	JC_BTN_ZR,	}, /* Mode */
+	{ BTN_TR,	JC_BTN_R,	}, /* C */
+	{ BTN_NORTH,	JC_BTN_X,	}, /* X MD/GEN 6B Only */
+	{ BTN_WEST,	JC_BTN_Y,	}, /* Y MD/GEN 6B Only */
+	{ BTN_TL,	JC_BTN_L,	}, /* Z MD/GEN 6B Only */
+	{ BTN_TR2,	JC_BTN_ZR,	}, /* Mode */
 	{ BTN_START,	JC_BTN_PLUS,	},
 	{ BTN_MODE,	JC_BTN_HOME,	},
 	{ BTN_Z,	JC_BTN_CAP,	},
 	{ /* sentinel */ },
 };
 
+/* MiSTer: button mapping from MiSTer 5.15 (#49), not mainline's */
 static const struct joycon_ctlr_button_mapping n64con_button_mappings[] = {
-	{ BTN_A,		JC_BTN_A,	},
-	{ BTN_B,		JC_BTN_B,	},
+	{ BTN_EAST,		JC_BTN_A,	},
+	{ BTN_SOUTH,		JC_BTN_B,	},
 	{ BTN_TL2,		JC_BTN_ZL,	}, /* Z */
 	{ BTN_TL,		JC_BTN_L,	},
 	{ BTN_TR,		JC_BTN_R,	},
 	{ BTN_TR2,		JC_BTN_LSTICK,	}, /* ZR */
 	{ BTN_START,		JC_BTN_PLUS,	},
-	{ BTN_SELECT,		JC_BTN_Y,	}, /* C UP */
-	{ BTN_X,		JC_BTN_ZR,	}, /* C DOWN */
-	{ BTN_Y,		JC_BTN_X,	}, /* C LEFT */
-	{ BTN_C,		JC_BTN_MINUS,	}, /* C RIGHT */
+	{ BTN_NORTH,		JC_BTN_Y,	}, /* C UP */
+	{ BTN_THUMBL,		JC_BTN_ZR,	}, /* C DOWN */
+	{ BTN_WEST,		JC_BTN_X,	}, /* C LEFT */
+	{ BTN_THUMBR,		JC_BTN_MINUS,	}, /* C RIGHT */
 	{ BTN_MODE,		JC_BTN_HOME,	},
 	{ BTN_Z,		JC_BTN_CAP,	},
 	{ /* sentinel */ },
@@ -689,6 +691,11 @@ struct joycon_ctlr {
 static inline bool joycon_device_is_chrggrip(struct joycon_ctlr *ctlr)
 {
 	return ctlr->hdev->product == USB_DEVICE_ID_NINTENDO_CHRGGRIP;
+}
+
+static inline bool joycon_device_is_8bitdo(struct joycon_ctlr *ctlr)
+{
+	return !strncmp(ctlr->mac_addr_str, "E4:17:D8", 8);
 }
 
 /*
@@ -2533,12 +2540,36 @@ static int joycon_read_info(struct joycon_ctlr *ctlr)
 static int joycon_init(struct hid_device *hdev)
 {
 	struct joycon_ctlr *ctlr = hid_get_drvdata(hdev);
+	bool usb_handshook = false;
 	int ret = 0;
 
 	mutex_lock(&ctlr->output_mutex);
 	/* if handshake command fails, assume ble pro controller */
 	if (joycon_using_usb(ctlr) && !joycon_send_usb(ctlr, JC_USB_CMD_HANDSHAKE, HZ)) {
 		hid_dbg(hdev, "detected USB controller\n");
+		usb_handshook = true;
+	} else if (jc_type_is_chrggrip(ctlr)) {
+		hid_err(hdev, "Failed charging grip handshake\n");
+		ret = -ETIMEDOUT;
+		goto out_unlock;
+	}
+
+	/* needed to retrieve the controller type */
+	ret = joycon_read_info(ctlr);
+	if (ret) {
+		hid_err(hdev, "Failed to retrieve controller info; ret=%d\n",
+			ret);
+		goto out_unlock;
+	}
+
+	/*
+	 * Only run the USB baudrate/handshake sequence if the initial handshake
+	 * was answered. A device that ignored it will not answer the second one
+	 * either, and that second failure is fatal. 8BitDo adapters do answer the
+	 * first handshake but do not implement the baudrate command, so they are
+	 * skipped as well.
+	 */
+	if (usb_handshook && !joycon_device_is_8bitdo(ctlr)) {
 		/* set baudrate for improved latency */
 		ret = joycon_send_usb(ctlr, JC_USB_CMD_BAUDRATE_3M, HZ);
 		if (ret) {
@@ -2559,18 +2590,6 @@ static int joycon_init(struct hid_device *hdev)
 		 * This doesn't send a response, so ignore the timeout.
 		 */
 		joycon_send_usb(ctlr, JC_USB_CMD_NO_TIMEOUT, HZ/10);
-	} else if (jc_type_is_chrggrip(ctlr)) {
-		hid_err(hdev, "Failed charging grip handshake\n");
-		ret = -ETIMEDOUT;
-		goto out_unlock;
-	}
-
-	/* needed to retrieve the controller type */
-	ret = joycon_read_info(ctlr);
-	if (ret) {
-		hid_err(hdev, "Failed to retrieve controller info; ret=%d\n",
-			ret);
-		goto out_unlock;
 	}
 
 	if (joycon_has_joysticks(ctlr)) {
